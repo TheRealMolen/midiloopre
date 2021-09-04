@@ -1,76 +1,24 @@
 
 #define D_REALMIDI
 
-
 #include <MIDI.h>
 
 #ifdef D_REALMIDI
 MIDI_CREATE_DEFAULT_INSTANCE();
 #define dbg(msg) do{}while(0)
 #else
-
-class FakeMidi
-{
-public:
-  void begin(int channel) {
-    Serial.begin(115200);
-    Serial.println("FakeMIDI engage....");
-  }
-  
-  void sendNoteOn(byte note, byte velocity, byte channel) {
-    Serial.print("ON  ");
-    Serial.print((int)note);
-    Serial.print(" @ c");
-    Serial.println((int)channel);
-  }
-  void sendNoteOff(byte note, byte velocity, byte channel) {
-    Serial.print("OFF ");
-    Serial.print((int)note);
-    Serial.print(" @ c");
-    Serial.println((int)channel);
-  }
-
-  char cmd;
-  char note;
-  
-  bool read() {
-    if (Serial.available() < 2) {
-      return false;
-    }
-    cmd = Serial.read();
-    note = Serial.read();
-    Serial.print("read ");
-    Serial.print(cmd);
-    Serial.print(note);
-    Serial.println("<");
-    return true;
-  }
-
-  midi::MidiType getType() {
-    if (cmd == 'p')
-      return midi::NoteOn;
-    if (cmd == 'o')
-      return midi::NoteOff;
-    return midi::PitchBend;
-  }
-
-  byte getData1() {
-    return 0x3a + (note - 'a');
-  }
-  byte getData2() {
-    return 100;
-  }  
- 
-  void turnThruOff() {}
-  
-};
-FakeMidi MIDI;
-
+#include "FakeMidi.h"
 void dbg(const char* msg) {
   Serial.println(msg);
 }
 #endif
 
+
+#define PIN_LED_REC 8
+#define PIN_LED_SLOW 9
+#define PIN_LED_PLAY 10
+#define PIN_LED_FAST 11
+#define PIN_BTN_REC 12
 
 byte recording = 0;
 byte recordWasDown = 0;
@@ -80,6 +28,9 @@ unsigned long lastRecordPress = 0;
 
 #define US_PER_TICK 512   // half ms resolution == max loop len ~32seconds
 #define MAX_US_PER_RECORDING (((unsigned long)US_PER_TICK) * ((unsigned long)0xffff))
+
+#define ANALOG_DEAD_ZONE 80
+
 
 struct MidiNoteUpdate {
   unsigned int tick;
@@ -93,6 +44,7 @@ MidiNoteUpdate recordBuf[MAX_NOTES];
 RecordBufIndex numNotesInBuf = 0;
 RecordBufIndex playHead = 0;
 unsigned int recordBufferTicks = 1;
+unsigned int playbackUsPerTick = US_PER_TICK;
 unsigned int playbackTicksElapsed = 0;
 unsigned long recordStartTimeUs = 0;
 unsigned long lastTimeUs = 0;
@@ -109,7 +61,6 @@ void startRecording() {
   numNotesInBuf = 0;
   recordStartTimeUs = micros();
   recording = true;
-  digitalWrite(9, true);
 }
 
 void stopRecording() {
@@ -119,11 +70,10 @@ void stopRecording() {
   playbackTicksElapsed = 0;
   lastTimeUs = micros();
   recordBufferTicks = (lastTimeUs - recordStartTimeUs + (US_PER_TICK / 2)) / US_PER_TICK;
-  digitalWrite(9, false);
-  
+
 #ifndef D_REALMIDI
   Serial.print("recbuf: [");
-  for (int i=0; i<numNotesInBuf; ++i) {
+  for (int i = 0; i < numNotesInBuf; ++i) {
     MidiNoteUpdate* n = recordBuf + i;
     Serial.print(n->tick);
     Serial.print(n->noteOn ? " on  " : " OFF ");
@@ -144,28 +94,28 @@ void recordNote(bool on, byte note, byte velocity) {
   unsigned int ticksSinceStart = usSinceStart / US_PER_TICK;
 
   digitalWrite(13, on ? HIGH : LOW);
-  
+
   MidiNoteUpdate* n = recordBuf + numNotesInBuf;
   n->tick = ticksSinceStart;
   n->noteOn = on;
   n->note = note;
   n->velocity = velocity;
-  
+
   ++numNotesInBuf;
   if (numNotesInBuf >= MAX_NOTES)
     stopRecording();
 }
 
 
-#define NOTE_MEMORY 10
-byte playingNotes[NOTE_MEMORY];
+#define NOTE_ON_MEMORY 10
+byte playingNotes[NOTE_ON_MEMORY];
 byte numPlayingNotes = 0;
 
 void rememberNoteOn(byte note) {
-  if (numPlayingNotes >= NOTE_MEMORY)
+  if (numPlayingNotes >= NOTE_ON_MEMORY)
     return;
-    
-  for (byte i=0; i<numPlayingNotes; ++i) {
+
+  for (byte i = 0; i < numPlayingNotes; ++i) {
     if (playingNotes[i] == note)
       return;
   }
@@ -174,9 +124,9 @@ void rememberNoteOn(byte note) {
   ++numPlayingNotes;
 }
 void forgetNoteOn(byte note) {
-  for (byte i=0; i<numPlayingNotes; ++i) {
+  for (byte i = 0; i < numPlayingNotes; ++i) {
     if (playingNotes[i] == note) {
-      playingNotes[i] = playingNotes[numPlayingNotes-1];
+      playingNotes[i] = playingNotes[numPlayingNotes - 1];
       --numPlayingNotes;
       return;
     }
@@ -192,8 +142,8 @@ void midiSend(const struct MidiNoteUpdate* note) {
     forgetNoteOn(note->note);
   }
 }
-void midiClearAllNotes() {  
-  for (byte i=0; i<numPlayingNotes; ++i) {
+void midiClearAllNotes() {
+  for (byte i = 0; i < numPlayingNotes; ++i) {
     MIDI.sendNoteOff(playingNotes[i], 0, SendChannel);
   }
   numPlayingNotes = 0;
@@ -203,16 +153,18 @@ void midiClearAllNotes() {
 
 void setup() {
   MIDI.begin(MIDI_CHANNEL_OMNI);
- // MIDI.turnThruOff();
   pinMode(13, OUTPUT);
-  pinMode(10, INPUT_PULLUP);
-  pinMode(9, OUTPUT);
+  pinMode(PIN_BTN_REC, INPUT_PULLUP);
+  pinMode(PIN_LED_REC, OUTPUT);
+  pinMode(PIN_LED_SLOW, OUTPUT);
+  pinMode(PIN_LED_PLAY, OUTPUT);
+  pinMode(PIN_LED_FAST, OUTPUT);
 
   lastTimeUs = micros();
 }
 
 void updateUI() {
-  byte recordDown = !digitalRead(10);
+  byte recordDown = !digitalRead(PIN_BTN_REC);
   if (recordDown != recordWasDown) {
     unsigned long now = millis();
     if ((now - lastRecordPress) > DEBOUNCE_MS) {
@@ -227,16 +179,50 @@ void updateUI() {
       }
     }
   }
+
+  if (recording) {
+    digitalWrite(PIN_LED_REC, 1);
+    digitalWrite(PIN_LED_SLOW, 0);
+    digitalWrite(PIN_LED_PLAY, 0);
+    digitalWrite(PIN_LED_FAST, 0);
+  }
+  else {
+    long speedInput = analogRead(0) - 512;   // range is [0,1023]
+    speedInput >>= 3;
+    speedInput = speedInput * speedInput * speedInput;
+    long speedExp = speedInput >> 10;
+    if (speedExp >= -1 && speedExp < 1) {
+      playbackUsPerTick = US_PER_TICK;
+      digitalWrite(PIN_LED_SLOW, 0);
+      digitalWrite(PIN_LED_PLAY, 1);
+      digitalWrite(PIN_LED_FAST, 0);
+    }
+    else if (speedExp < 0) {
+      playbackUsPerTick = map(speedExp, -256, -1, 8 * US_PER_TICK, US_PER_TICK);
+      digitalWrite(PIN_LED_SLOW, 1);
+      digitalWrite(PIN_LED_PLAY, 0);
+      digitalWrite(PIN_LED_FAST, 0);
+    }
+    else {
+      playbackUsPerTick = map(speedExp, 1, 244, US_PER_TICK, 64);
+      digitalWrite(PIN_LED_SLOW, 0);
+      digitalWrite(PIN_LED_PLAY, 0);
+      digitalWrite(PIN_LED_FAST, 1);
+    }
+    
+    digitalWrite(PIN_LED_REC, 0);
+  }
 }
 
 unsigned long tickProgressUs = 0;
+
 void updatePlayback() {
   unsigned long now = micros();
   unsigned long deltaUs = now - lastTimeUs;
   lastTimeUs = now;
   tickProgressUs += deltaUs;
-  while (tickProgressUs > US_PER_TICK) {
-    tickProgressUs -= US_PER_TICK;
+  while (tickProgressUs > playbackUsPerTick) {
+    tickProgressUs -= playbackUsPerTick;
 
     ++playbackTicksElapsed;
     if (playbackTicksElapsed > recordBufferTicks) {
@@ -244,7 +230,7 @@ void updatePlayback() {
       playbackTicksElapsed = 0;
     }
 
-    while ((playHead < numNotesInBuf) && (recordBuf[playHead].tick == playbackTicksElapsed)) {
+    while ((playHead < numNotesInBuf) && (recordBuf[playHead].tick <= playbackTicksElapsed)) {
 #ifndef D_REALMIDI
       Serial.print("play: usleft=");
       Serial.print(tickProgressUs);
@@ -264,20 +250,20 @@ void updatePlayback() {
 
 
 void handleMidi() {
-  switch(MIDI.getType())
+  switch (MIDI.getType())
   {
-  case midi::NoteOn:
-    if (recording)
-      recordNote(true, MIDI.getData1(), MIDI.getData2());
-    break;
+    case midi::NoteOn:
+      if (recording)
+        recordNote(true, MIDI.getData1(), MIDI.getData2());
+      break;
 
-  case midi::NoteOff:
-    if (recording)
-      recordNote(false, MIDI.getData1(), MIDI.getData2());
-    break;
+    case midi::NoteOff:
+      if (recording)
+        recordNote(false, MIDI.getData1(), MIDI.getData2());
+      break;
 
-  default:
-    break;
+    default:
+      break;
   }
 }
 
