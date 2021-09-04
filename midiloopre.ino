@@ -1,36 +1,17 @@
-
-#define D_REALMIDI
-
 #include <Adafruit_NeoPixel.h>
 #include <MIDI.h>
+#include "DebouncedInput.h"
 
-#ifdef D_REALMIDI
+#define PIN_UIPIXEL       11
+#define PIN_BTN_REC       12
+
 MIDI_CREATE_DEFAULT_INSTANCE();
-#define dbg(msg) do{}while(0)
-#else
-#include "FakeMidi.h"
-void dbg(const char* msg) {
-  Serial.println(msg);
-}
-#endif
 
-
-#define PIN_LED_REC 8
-#define PIN_LED_SLOW 9
-#define PIN_LED_PLAY 10
-#define PIN_LED_FAST 11
-#define PIN_BTN_REC 12
-
+DebouncedInput<PIN_BTN_REC> recordButton;
 byte recording = 0;
-byte recordWasDown = 0;
-unsigned long lastRecordPress = 0;
-
-#define DEBOUNCE_MS 50
 
 #define US_PER_TICK 512   // half ms resolution == max loop len ~32seconds
 #define MAX_US_PER_RECORDING (((unsigned long)US_PER_TICK) * ((unsigned long)0xffff))
-
-#define ANALOG_DEAD_ZONE 80
 
 
 struct MidiNoteUpdate {
@@ -59,7 +40,6 @@ void midiClearAllNotes();
 
 
 void startRecording() {
-  dbg("Start recording");
   midiClearAllNotes();
   numNotesInBuf = 0;
   recordStartTimeUs = micros();
@@ -67,28 +47,14 @@ void startRecording() {
 }
 
 void stopRecording() {
-  dbg("STOP recording");
   recording = false;
   playHead = 0;
   playbackTicksElapsed = 0;
   lastTimeUs = micros();
-  recordBufferTicks = (lastTimeUs - recordStartTimeUs + (US_PER_TICK / 2)) / US_PER_TICK;
-
-#ifndef D_REALMIDI
-  Serial.print("recbuf: [");
-  for (int i = 0; i < numNotesInBuf; ++i) {
-    MidiNoteUpdate* n = recordBuf + i;
-    Serial.print(n->tick);
-    Serial.print(n->noteOn ? " on  " : " OFF ");
-    Serial.print((int)n->note);
-    Serial.print(", ");
-  }
-  Serial.println("]");
-#endif
+  recordBufferTicks = (lastTimeUs - recordStartTimeUs + (US_PER_TICK)) / US_PER_TICK;
 }
 
 void recordNote(bool on, byte note, byte velocity) {
-  dbg("recordNote");
   unsigned long usSinceStart = (micros() - recordStartTimeUs);
   if (usSinceStart >= MAX_US_PER_RECORDING) {
     stopRecording();
@@ -153,39 +119,20 @@ void midiClearAllNotes() {
 }
 
 
-
-void setup() {
-  MIDI.begin(MIDI_CHANNEL_OMNI);
-  pinMode(13, OUTPUT);
-  pinMode(PIN_BTN_REC, INPUT_PULLUP);
-  
-  uiPixel.begin();
-  uiPixel.show();
-  uiPixel.setBrightness(20);
-
-  lastTimeUs = micros();
-}
-
 void updateUI() {
   bool uiChanged = false;
+  uint16_t nowMs = millis();
 
   // --- update recording state ---
-  byte recordDown = !digitalRead(PIN_BTN_REC);
-  if (recordDown != recordWasDown) {
-    unsigned long now = millis();
-    if ((now - lastRecordPress) > DEBOUNCE_MS) {
-      recordWasDown = recordDown;
-      lastRecordPress = now;
+  if (recordButton.update(nowMs)) {
+    if (recordButton.isDown()) {
+      if (!recording)
+        startRecording();
+      else
+        stopRecording();
 
-      if (recordDown) {
-        if (!recording)
-          startRecording();
-        else
-          stopRecording();
-
-        uiChanged = true;
-      }
-    }
+      uiChanged = true;
+    } 
   }
   
   // --- update playback speed ---
@@ -239,17 +186,6 @@ void updatePlayback() {
     }
 
     while ((playHead < numNotesInBuf) && (recordBuf[playHead].tick <= playbackTicksElapsed)) {
-#ifndef D_REALMIDI
-      Serial.print("play: usleft=");
-      Serial.print(tickProgressUs);
-      Serial.print(", dUs=");
-      Serial.print(deltaUs);
-      Serial.print(", elapsed=");
-      Serial.print(playbackTicksElapsed);
-      Serial.print(", playhead=");
-      Serial.print(playHead);
-      Serial.println();
-#endif
       midiSend(&recordBuf[playHead]);
       ++playHead;
     }
@@ -273,6 +209,22 @@ void handleMidi() {
     default:
       break;
   }
+}
+
+
+
+
+void setup() {
+  MIDI.begin(MIDI_CHANNEL_OMNI);
+  pinMode(13, OUTPUT);
+  
+  recordButton.init();
+  
+  uiPixel.begin();
+  uiPixel.show();
+  uiPixel.setBrightness(20);
+
+  lastTimeUs = micros();
 }
 
 void loop() {
