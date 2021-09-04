@@ -1,6 +1,7 @@
 
 #define D_REALMIDI
 
+#include <Adafruit_NeoPixel.h>
 #include <MIDI.h>
 
 #ifdef D_REALMIDI
@@ -44,10 +45,12 @@ MidiNoteUpdate recordBuf[MAX_NOTES];
 RecordBufIndex numNotesInBuf = 0;
 RecordBufIndex playHead = 0;
 unsigned int recordBufferTicks = 1;
-unsigned int playbackUsPerTick = US_PER_TICK;
+unsigned int playbackUsPerTick = 0; // forces the ui to update on boot
 unsigned int playbackTicksElapsed = 0;
 unsigned long recordStartTimeUs = 0;
 unsigned long lastTimeUs = 0;
+
+Adafruit_NeoPixel uiPixel(1, 11, NEO_GRB + NEO_KHZ800);
 
 const byte SendChannel = 6;
 
@@ -155,15 +158,18 @@ void setup() {
   MIDI.begin(MIDI_CHANNEL_OMNI);
   pinMode(13, OUTPUT);
   pinMode(PIN_BTN_REC, INPUT_PULLUP);
-  pinMode(PIN_LED_REC, OUTPUT);
-  pinMode(PIN_LED_SLOW, OUTPUT);
-  pinMode(PIN_LED_PLAY, OUTPUT);
-  pinMode(PIN_LED_FAST, OUTPUT);
+  
+  uiPixel.begin();
+  uiPixel.show();
+  uiPixel.setBrightness(20);
 
   lastTimeUs = micros();
 }
 
 void updateUI() {
+  bool uiChanged = false;
+
+  // --- update recording state ---
   byte recordDown = !digitalRead(PIN_BTN_REC);
   if (recordDown != recordWasDown) {
     unsigned long now = millis();
@@ -176,41 +182,43 @@ void updateUI() {
           startRecording();
         else
           stopRecording();
+
+        uiChanged = true;
       }
     }
   }
-
-  if (recording) {
-    digitalWrite(PIN_LED_REC, 1);
-    digitalWrite(PIN_LED_SLOW, 0);
-    digitalWrite(PIN_LED_PLAY, 0);
-    digitalWrite(PIN_LED_FAST, 0);
-  }
-  else {
+  
+  // --- update playback speed ---
+  uint32_t playbackCol;
+  {
+    unsigned int oldUsPerTick = playbackUsPerTick;
+    
     long speedInput = analogRead(0) - 512;   // range is [0,1023]
     speedInput >>= 3;
     speedInput = speedInput * speedInput * speedInput;
     long speedExp = speedInput >> 10;
-    if (speedExp >= -1 && speedExp < 1) {
+    
+    if (speedExp >= -1 && speedExp <= 1) {
       playbackUsPerTick = US_PER_TICK;
-      digitalWrite(PIN_LED_SLOW, 0);
-      digitalWrite(PIN_LED_PLAY, 1);
-      digitalWrite(PIN_LED_FAST, 0);
+      playbackCol = uiPixel.ColorHSV(21845, 255, 200);
     }
     else if (speedExp < 0) {
       playbackUsPerTick = map(speedExp, -256, -1, 8 * US_PER_TICK, US_PER_TICK);
-      digitalWrite(PIN_LED_SLOW, 1);
-      digitalWrite(PIN_LED_PLAY, 0);
-      digitalWrite(PIN_LED_FAST, 0);
+      playbackCol = uiPixel.ColorHSV(map(speedExp, -256, -1, 6000, 20000), 220, 230);
     }
     else {
-      playbackUsPerTick = map(speedExp, 1, 244, US_PER_TICK, 64);
-      digitalWrite(PIN_LED_SLOW, 0);
-      digitalWrite(PIN_LED_PLAY, 0);
-      digitalWrite(PIN_LED_FAST, 1);
+      playbackUsPerTick = map(speedExp, 1, 244, US_PER_TICK, 32);
+      playbackCol = uiPixel.ColorHSV(map(speedExp, 1, 244, 21900, 37000), 150, 255);
     }
-    
-    digitalWrite(PIN_LED_REC, 0);
+
+    if (playbackUsPerTick != oldUsPerTick)
+      uiChanged = true;
+  }
+
+  if (uiChanged) {
+    uint32_t colour = recording ? uiPixel.Color(240, 30, 30) : playbackCol;
+    uiPixel.setPixelColor(0, uiPixel.gamma32(colour));
+    uiPixel.show();
   }
 }
 
