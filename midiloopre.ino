@@ -2,6 +2,8 @@
 #include <MIDI.h>
 #include "DebouncedInput.h"
 
+#define PIN_BTN_THRU      9
+#define PIN_BTN_CHANNEL   10
 #define PIN_UIPIXEL       11
 #define PIN_BTN_REC       12
 
@@ -15,7 +17,7 @@ byte recording = 0;
 
 
 struct MidiNoteUpdate {
-  unsigned int tick;
+  uint16_t tick;
   byte note : 7;
   byte noteOn : 1;
   byte velocity;    // top bit unused
@@ -25,15 +27,21 @@ using RecordBufIndex = byte;
 MidiNoteUpdate recordBuf[MAX_NOTES];
 RecordBufIndex numNotesInBuf = 0;
 RecordBufIndex playHead = 0;
-unsigned int recordBufferTicks = 1;
-unsigned int playbackUsPerTick = 0; // forces the ui to update on boot
-unsigned int playbackTicksElapsed = 0;
-unsigned long recordStartTimeUs = 0;
-unsigned long lastTimeUs = 0;
+uint16_t recordBufferTicks = 1;
+uint16_t playbackUsPerTick = 0; // forces the ui to update on boot
+uint16_t playbackTicksElapsed = 0;
+uint32_t recordStartTimeUs = 0;
+uint32_t lastTimeUs = 0;
 
 Adafruit_NeoPixel uiPixel(1, 11, NEO_GRB + NEO_KHZ800);
+uint32_t uiOverrideCol = uiPixel.Color(0xff, 0xff, 0xff);
+uint16_t uiOverrideMsRemaining = 0;
+uint16_t uiLastMs = 0;
 
-const byte SendChannel = 6;
+DebouncedInput<PIN_BTN_CHANNEL> channelButton;
+byte sendChannel = 1;
+DebouncedInput<PIN_BTN_THRU> thruButton;
+bool thruEnabled = true;
 
 
 void midiClearAllNotes();
@@ -103,21 +111,29 @@ void forgetNoteOn(byte note) {
 }
 void midiSend(const struct MidiNoteUpdate* note) {
   if (note->noteOn) {
-    MIDI.sendNoteOn(note->note, note->velocity, SendChannel);
+    MIDI.sendNoteOn(note->note, note->velocity, sendChannel);
     rememberNoteOn(note->note);
+    digitalWrite(13, HIGH);
   }
   else {
-    MIDI.sendNoteOff(note->note, 0, SendChannel);
+    MIDI.sendNoteOff(note->note, 0, sendChannel);
     forgetNoteOn(note->note);
+    digitalWrite(13, LOW);
   }
 }
 void midiClearAllNotes() {
   for (byte i = 0; i < numPlayingNotes; ++i) {
-    MIDI.sendNoteOff(playingNotes[i], 0, SendChannel);
+    MIDI.sendNoteOff(playingNotes[i], 0, sendChannel);
   }
   numPlayingNotes = 0;
+  digitalWrite(13, LOW);
 }
 
+
+void overrideUiCol(uint32_t col) {
+  uiOverrideMsRemaining = 150;
+  uiOverrideCol = col;
+}
 
 void updateUI() {
   bool uiChanged = false;
@@ -133,6 +149,23 @@ void updateUI() {
 
       uiChanged = true;
     } 
+  }
+
+  // --- update playback channel ---
+  if (channelButton.update(nowMs) && channelButton.isDown()) {
+    sendChannel = (sendChannel + 1) & 0xf;
+    overrideUiCol(uiPixel.Color(0xc0, 0xc0, 0xc0));
+  }
+
+  // --- update midi thru ---
+  if (thruButton.update(nowMs) && thruButton.isDown()) {
+    thruEnabled = !thruEnabled;
+    if (thruEnabled)
+      MIDI.turnThruOn();
+    else
+      MIDI.turnThruOff();
+    
+    overrideUiCol(thruEnabled ? uiPixel.Color(0x80, 0xf0, 0xc0) : uiPixel.Color(0xf0, 0xc0, 0x80));
   }
   
   // --- update playback speed ---
@@ -151,7 +184,7 @@ void updateUI() {
     }
     else if (speedExp < 0) {
       playbackUsPerTick = map(speedExp, -256, -1, 8 * US_PER_TICK, US_PER_TICK);
-      playbackCol = uiPixel.ColorHSV(map(speedExp, -256, -1, 6000, 20000), 220, 230);
+      playbackCol = uiPixel.ColorHSV(map(speedExp, -256, -1, 6000, 20000), 220, 255);
     }
     else {
       playbackUsPerTick = map(speedExp, 1, 244, US_PER_TICK, 32);
@@ -162,8 +195,26 @@ void updateUI() {
       uiChanged = true;
   }
 
+  if (uiOverrideMsRemaining > 0) {
+    uint16_t deltaMs = nowMs - uiLastMs;
+    if (deltaMs > uiOverrideMsRemaining)
+      uiOverrideMsRemaining = 0;
+    else
+      uiOverrideMsRemaining -= deltaMs;
+
+    uiChanged = true;
+  }
+  uiLastMs = nowMs;
+
   if (uiChanged) {
-    uint32_t colour = recording ? uiPixel.Color(240, 30, 30) : playbackCol;
+    uint32_t colour;
+    if (uiOverrideMsRemaining > 0)
+      colour = uiOverrideCol;
+    else if (recording)
+      colour = uiPixel.Color(240, 30, 30);
+    else
+      colour = playbackCol;
+      
     uiPixel.setPixelColor(0, uiPixel.gamma32(colour));
     uiPixel.show();
   }
@@ -219,10 +270,12 @@ void setup() {
   pinMode(13, OUTPUT);
   
   recordButton.init();
+  channelButton.init();
+  thruButton.init();
   
   uiPixel.begin();
   uiPixel.show();
-  uiPixel.setBrightness(20);
+  uiPixel.setBrightness(25);
 
   lastTimeUs = micros();
 }

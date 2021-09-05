@@ -1,6 +1,6 @@
 #pragma once
 
-#define DEBOUNCE_MS 50
+#define DEBOUNCE_MS 80
 
 template<int Pin>
 class DebouncedInput {
@@ -32,5 +32,5 @@ private:
     m_state = (nowMillis << 1) | isDownNow;
   }
 
-  uint16_t m_state; // bottom bit is isDown, remainder are the last press time in milliseconds  
+  uint8_t m_state; // bottom bit is isDown, remainder are the last press time in milliseconds  
 };
